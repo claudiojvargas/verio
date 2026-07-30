@@ -1,0 +1,207 @@
+import { Prisma } from "@prisma/client";
+
+import { db } from "@/lib/db/client";
+import { createGoogleCredibilityAnalyzer } from "@/modules/ai-analyzer/infrastructure/google/create-google-analyzer";
+import { assessRegisteredChannels } from "@/modules/analyses/application/registration-assessment";
+import { calculateVerioScore } from "@/modules/scoring";
+import { VERIO_SCORE_V1 } from "@/modules/scoring/policies/verio-score-v1";
+
+export async function runAnalysis(analysisId: string) {
+  const analysis = await db.analysis.findUnique({
+    where: { id: analysisId },
+    include: {
+      business: { include: { channels: true } },
+      competitors: {
+        include: { competitorBusiness: { include: { channels: true } } },
+      },
+    },
+  });
+  if (!analysis) throw new Error("ANALYSIS_NOT_FOUND");
+
+  try {
+    const primaryAssessment = assessRegisteredChannels(
+      analysis.business.channels,
+    );
+    if (primaryAssessment.evidence.length === 0)
+      throw new Error("NO_CONFIRMED_CHANNELS");
+    const score = calculateVerioScore(
+      primaryAssessment.observations,
+      VERIO_SCORE_V1,
+    );
+    const ai = await createGoogleCredibilityAnalyzer().analyze(
+      {
+        business: {
+          name: analysis.business.name,
+          city: analysis.business.city,
+        },
+        evidence: primaryAssessment.evidence,
+      },
+      AbortSignal.timeout(45_000),
+    );
+    const positive = ai.data.observations.find(
+      ({ outcome }) => outcome === "POSITIVE",
+    );
+    const attention = ai.data.observations.find(
+      ({ outcome }) => outcome === "ATTENTION",
+    );
+    const summary = {
+      strength: positive?.explanation ?? ai.data.summary,
+      priority:
+        attention?.explanation ??
+        ai.data.recommendationDrafts[0]?.rationale ??
+        ai.data.summary,
+    };
+
+    const competitorResults = analysis.competitors.map((competitor) => {
+      const assessment = assessRegisteredChannels(
+        competitor.competitorBusiness.channels,
+      );
+      return {
+        competitorBusinessId: competitor.competitorBusinessId,
+        score: calculateVerioScore(assessment.observations, VERIO_SCORE_V1),
+      };
+    });
+
+    await db.$transaction(async (transaction) => {
+      await transaction.analysisResult.create({
+        data: {
+          analysisId: analysis.id,
+          status: score.status,
+          totalScore: score.totalScore,
+          coveragePercentage: Math.round(score.coverage),
+          dimensions: score.categories.map(
+            ({ category, score: categoryScore }) => ({
+              key: category,
+              score: categoryScore,
+            }),
+          ) as Prisma.InputJsonValue,
+          evidence:
+            primaryAssessment.evidence as unknown as Prisma.InputJsonValue,
+          summary,
+        },
+      });
+      for (const competitor of competitorResults) {
+        await transaction.analysisCompetitor.update({
+          where: {
+            analysisId_competitorBusinessId: {
+              analysisId: analysis.id,
+              competitorBusinessId: competitor.competitorBusinessId,
+            },
+          },
+          data: {
+            totalScore: competitor.score.totalScore,
+            coveragePercentage: Math.round(competitor.score.coverage),
+            dimensions: competitor.score.categories.map(
+              ({ category, score: categoryScore }) => ({
+                key: category,
+                score: categoryScore,
+              }),
+            ) as Prisma.InputJsonValue,
+          },
+        });
+      }
+      for (const [
+        index,
+        recommendation,
+      ] of ai.data.recommendationDrafts.entries()) {
+        await transaction.recommendation.create({
+          data: {
+            analysisId: analysis.id,
+            key: recommendation.key,
+            title: recommendation.title,
+            rationale: recommendation.rationale,
+            evidenceKeys: recommendation.evidenceKeys,
+            impact: recommendation.impact,
+            effort: recommendation.effort,
+            confidence: 70,
+            priority: index + 1,
+            steps: recommendation.steps,
+            generatorVersion: `${ai.metadata.provider}:${ai.metadata.model}:${ai.metadata.promptVersion}`,
+          },
+        });
+      }
+      await transaction.analysis.update({
+        where: { id: analysis.id },
+        data: { status: "COMPLETED", completedAt: new Date() },
+      });
+      await transaction.analysisJob.update({
+        where: { analysisId: analysis.id },
+        data: { status: "SUCCEEDED", lockedAt: null, lockedBy: null },
+      });
+    });
+  } catch (error) {
+    await db.$transaction([
+      db.analysis.update({
+        where: { id: analysis.id },
+        data: {
+          status: "FAILED",
+          completedAt: new Date(),
+          failureCode: toFailureCode(error),
+        },
+      }),
+      db.analysisJob.update({
+        where: { analysisId: analysis.id },
+        data: {
+          status: "FAILED",
+          lockedAt: null,
+          lockedBy: null,
+          lastErrorCode: toFailureCode(error),
+        },
+      }),
+    ]);
+    throw error;
+  }
+}
+
+export async function processNextAnalysisJob(workerId: string) {
+  const job = await db.$transaction(
+    async (transaction) => {
+      const staleBefore = new Date(Date.now() - 5 * 60_000);
+      await transaction.analysisJob.updateMany({
+        where: { status: "PROCESSING", lockedAt: { lt: staleBefore } },
+        data: { status: "RETRY", lockedAt: null, lockedBy: null },
+      });
+      const candidate = await transaction.analysisJob.findFirst({
+        where: {
+          status: { in: ["PENDING", "RETRY"] },
+          availableAt: { lte: new Date() },
+        },
+        orderBy: { availableAt: "asc" },
+      });
+      if (!candidate) return null;
+
+      const claimed = await transaction.analysisJob.updateMany({
+        where: { id: candidate.id, status: candidate.status, lockedAt: null },
+        data: {
+          status: "PROCESSING",
+          attempts: { increment: 1 },
+          lockedAt: new Date(),
+          lockedBy: workerId,
+        },
+      });
+      if (claimed.count !== 1) return null;
+
+      await transaction.analysis.update({
+        where: { id: candidate.analysisId },
+        data: {
+          status: "PROCESSING",
+          startedAt: new Date(),
+          failureCode: null,
+        },
+      });
+      return candidate;
+    },
+    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+  );
+
+  if (!job) return null;
+  await runAnalysis(job.analysisId);
+  return job.analysisId;
+}
+
+function toFailureCode(error: unknown) {
+  if (error instanceof Error && error.message === "NO_CONFIRMED_CHANNELS") {
+    return error.message;
+  }
+  return "ANALYSIS_EXECUTION_FAILED";
+}
