@@ -48,7 +48,7 @@ validate_key_formats() {
     error "As chaves Clerk pertencem a ambientes diferentes (test/live)."
     return 1
   fi
-  [[ "$google_key" =~ ^AIza[A-Za-z0-9_-]{35}$ ]] || {
+  [[ "$google_key" =~ ^AIza[A-Za-z0-9_-]{35}$ || "$google_key" =~ ^AQ\.[A-Za-z0-9._-]+$ ]] || {
     error "A chave Google AI não possui o formato esperado (prefixo AIza)."
     return 1
   }
@@ -96,7 +96,7 @@ validate_remote_keys() {
 
   info "Validando a chave secreta do Clerk..."
   status="$(printf '%s\n' \
-    'url = "https://api.clerk.com/v1/clients?limit=1"' \
+    'url = "https://api.clerk.com/v1/users?limit=1"' \
     "header = \"Authorization: Bearer ${clerk_secret}\"" \
     'header = "Accept: application/json"' | \
     curl --config - --silent --show-error --connect-timeout 10 \

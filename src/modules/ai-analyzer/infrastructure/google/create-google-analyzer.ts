@@ -7,7 +7,7 @@ import { CredibilityAIAnalyzer } from "@/modules/analyses/ai/credibility-ai-anal
 
 const googleAIEnvironmentSchema = z.object({
   GOOGLE_AI_API_KEY: z.string().min(1),
-  GOOGLE_AI_MODEL: z.string().min(1).default("gemini-2.5-flash"),
+  GOOGLE_AI_MODEL: z.string().min(1).default("gemini-3.6-flash"),
 });
 
 /** Composition root: the only place that selects Google for this use case. */
