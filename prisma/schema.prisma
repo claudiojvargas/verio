@@ -1,0 +1,329 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserStatus {
+  ACTIVE
+  DISABLED
+}
+
+enum MembershipRole {
+  OWNER
+  VIEWER
+}
+
+enum BusinessStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+enum ChannelType {
+  GOOGLE_MAPS
+  WEBSITE
+  WHATSAPP
+}
+
+enum ChannelStatus {
+  CONFIRMED
+  UNAVAILABLE
+  UNRECOGNIZED
+}
+
+enum AnalysisStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  PARTIAL
+  FAILED
+}
+
+enum AnalysisKind {
+  INITIAL
+  REANALYSIS
+}
+
+enum AnalysisJobStatus {
+  PENDING
+  PROCESSING
+  RETRY
+  SUCCEEDED
+  FAILED
+}
+
+enum AnalysisResultStatus {
+  SCORED
+  INSUFFICIENT_COVERAGE
+}
+
+enum RecommendationImpact {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum RecommendationEffort {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum ActionStatus {
+  NOT_STARTED
+  IN_PROGRESS
+  COMPLETED
+  IGNORED
+  NOT_APPLICABLE
+}
+
+/// Minimal local representation of an authenticated person. Authentication
+/// credentials remain with the identity provider and are never stored here.
+model User {
+  id                 String                @id @default(cuid())
+  identityProviderId String                @unique @map("identity_provider_id")
+  email              String                @unique
+  name               String?
+  status             UserStatus            @default(ACTIVE)
+  createdAt          DateTime              @default(now()) @map("created_at")
+  updatedAt          DateTime              @updatedAt @map("updated_at")
+  memberships        BusinessMembership[]
+  requestedAnalyses  Analysis[]            @relation("RequestedAnalyses")
+  competitorEntries  Competitor[]          @relation("CompetitorCreatedBy")
+  actions            RecommendationAction[]
+
+  @@map("users")
+}
+
+/// A business is reusable as the user's company or as a competitor. Ownership
+/// is expressed by memberships instead of duplicating competitor information.
+model Business {
+  id                    String                 @id @default(cuid())
+  name                  String
+  normalizedName        String                 @map("normalized_name")
+  city                  String
+  state                 String?
+  countryCode           String                 @default("BR") @db.Char(2) @map("country_code")
+  status                BusinessStatus         @default(ACTIVE)
+  createdAt             DateTime               @default(now()) @map("created_at")
+  updatedAt             DateTime               @updatedAt @map("updated_at")
+  memberships           BusinessMembership[]
+  channels              BusinessChannel[]
+  analyses              Analysis[]
+  competitors           Competitor[]           @relation("PrimaryBusinessCompetitors")
+  competitorOf          Competitor[]           @relation("ComparedBusiness")
+  analysisComparisons   AnalysisCompetitor[]   @relation("PrimaryAnalysisBusiness")
+  comparedInAnalyses    AnalysisCompetitor[]   @relation("ComparedAnalysisBusiness")
+  recommendationActions RecommendationAction[]
+
+  @@index([normalizedName, city])
+  @@map("businesses")
+}
+
+model BusinessMembership {
+  userId     String         @map("user_id")
+  businessId String         @map("business_id")
+  role       MembershipRole @default(OWNER)
+  createdAt  DateTime       @default(now()) @map("created_at")
+  user       User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  business   Business       @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@id([userId, businessId])
+  @@index([businessId])
+  @@map("business_memberships")
+}
+
+model BusinessChannel {
+  id                 String        @id @default(cuid())
+  businessId         String        @map("business_id")
+  type               ChannelType
+  value              String
+  canonicalValue     String        @map("canonical_value")
+  status             ChannelStatus @default(CONFIRMED)
+  confirmedAt        DateTime?     @map("confirmed_at")
+  createdAt          DateTime      @default(now()) @map("created_at")
+  updatedAt          DateTime      @updatedAt @map("updated_at")
+  business           Business      @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@unique([businessId, type])
+  @@index([type, canonicalValue])
+  @@map("business_channels")
+}
+
+/// The user's current private competitor set. Position is constrained to 1..3
+/// in the migration, enforcing the MVP limit without an application race.
+model Competitor {
+  id                   String   @id @default(cuid())
+  businessId           String   @map("business_id")
+  competitorBusinessId String   @map("competitor_business_id")
+  createdByUserId      String   @map("created_by_user_id")
+  position             Int
+  createdAt            DateTime @default(now()) @map("created_at")
+  business             Business @relation("PrimaryBusinessCompetitors", fields: [businessId], references: [id], onDelete: Cascade)
+  competitorBusiness   Business @relation("ComparedBusiness", fields: [competitorBusinessId], references: [id], onDelete: Cascade)
+  createdBy            User     @relation("CompetitorCreatedBy", fields: [createdByUserId], references: [id], onDelete: Cascade)
+
+  @@unique([businessId, competitorBusinessId])
+  @@unique([businessId, position])
+  @@index([competitorBusinessId])
+  @@index([createdByUserId])
+  @@map("competitors")
+}
+
+model Analysis {
+  id                 String               @id @default(cuid())
+  businessId         String               @map("business_id")
+  requestedByUserId  String               @map("requested_by_user_id")
+  baselineAnalysisId String?              @map("baseline_analysis_id")
+  kind               AnalysisKind         @default(INITIAL)
+  status             AnalysisStatus       @default(PENDING)
+  methodologyVersion String               @map("methodology_version")
+  startedAt          DateTime?            @map("started_at")
+  completedAt        DateTime?            @map("completed_at")
+  failureCode        String?              @map("failure_code")
+  createdAt          DateTime             @default(now()) @map("created_at")
+  updatedAt          DateTime             @updatedAt @map("updated_at")
+  business           Business             @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  requestedBy        User                 @relation("RequestedAnalyses", fields: [requestedByUserId], references: [id], onDelete: Restrict)
+  baselineAnalysis   Analysis?            @relation("AnalysisBaseline", fields: [baselineAnalysisId], references: [id], onDelete: SetNull)
+  reanalyses         Analysis[]            @relation("AnalysisBaseline")
+  job                AnalysisJob?
+  result             AnalysisResult?
+  competitors        AnalysisCompetitor[]
+  recommendations    Recommendation[]
+  events             AnalysisEvent[]
+
+  @@index([businessId, createdAt(sort: Desc)])
+  @@index([requestedByUserId])
+  @@index([baselineAnalysisId])
+  @@index([status, createdAt])
+  @@map("analyses")
+}
+
+/// Sanitized processing timeline. It never stores credentials, raw prompts or
+/// provider payloads and is safe to expose only to an authorized business user.
+model AnalysisEvent {
+  id               String   @id @default(cuid())
+  analysisId       String   @map("analysis_id")
+  stage            String
+  status           String
+  code             String?
+  publicMessage    String   @map("public_message")
+  technicalMessage String?  @map("technical_message")
+  metadata         Json?
+  durationMs       Int?     @map("duration_ms")
+  createdAt        DateTime @default(now()) @map("created_at")
+  analysis         Analysis @relation(fields: [analysisId], references: [id], onDelete: Cascade)
+
+  @@index([analysisId, createdAt])
+  @@map("analysis_events")
+}
+
+model AnalysisJob {
+  id            String            @id @default(cuid())
+  analysisId    String            @unique @map("analysis_id")
+  status        AnalysisJobStatus @default(PENDING)
+  attempts      Int               @default(0)
+  availableAt   DateTime          @default(now()) @map("available_at")
+  lockedAt      DateTime?         @map("locked_at")
+  lockedBy      String?           @map("locked_by")
+  lastErrorCode String?           @map("last_error_code")
+  createdAt     DateTime          @default(now()) @map("created_at")
+  updatedAt     DateTime          @updatedAt @map("updated_at")
+  analysis      Analysis          @relation(fields: [analysisId], references: [id], onDelete: Cascade)
+
+  @@index([status, availableAt])
+  @@map("analysis_jobs")
+}
+
+/// Immutable snapshot used for the report. JSON fields are versioned payloads,
+/// not substitutes for entities queried independently.
+model AnalysisResult {
+  id                 String               @id @default(cuid())
+  analysisId         String               @unique @map("analysis_id")
+  status             AnalysisResultStatus
+  totalScore         Int?                 @map("total_score")
+  coveragePercentage Int                  @map("coverage_percentage")
+  dimensions         Json
+  evidence           Json
+  summary            Json
+  createdAt          DateTime             @default(now()) @map("created_at")
+  analysis           Analysis             @relation(fields: [analysisId], references: [id], onDelete: Cascade)
+
+  @@map("analysis_results")
+}
+
+/// Snapshot of competitors used by one analysis. It remains stable even if the
+/// user's current competitor set changes later.
+model AnalysisCompetitor {
+  analysisId           String                @map("analysis_id")
+  primaryBusinessId    String                @map("primary_business_id")
+  competitorBusinessId String                @map("competitor_business_id")
+  position             Int
+  nameSnapshot         String                @map("name_snapshot")
+  citySnapshot         String                @map("city_snapshot")
+  stateSnapshot        String?               @map("state_snapshot")
+  channelsSnapshot     Json                  @map("channels_snapshot")
+  resultStatus         AnalysisResultStatus? @map("result_status")
+  totalScore           Int?                  @map("total_score")
+  coveragePercentage   Int?                  @map("coverage_percentage")
+  dimensions           Json?
+  evidence             Json?
+  createdAt            DateTime              @default(now()) @map("created_at")
+  analysis             Analysis              @relation(fields: [analysisId], references: [id], onDelete: Cascade)
+  primaryBusiness      Business              @relation("PrimaryAnalysisBusiness", fields: [primaryBusinessId], references: [id], onDelete: Restrict)
+  competitorBusiness   Business              @relation("ComparedAnalysisBusiness", fields: [competitorBusinessId], references: [id], onDelete: Restrict)
+
+  @@id([analysisId, competitorBusinessId])
+  @@unique([analysisId, position])
+  @@index([primaryBusinessId])
+  @@index([competitorBusinessId])
+  @@map("analysis_competitors")
+}
+
+model Recommendation {
+  id               String               @id @default(cuid())
+  analysisId       String               @map("analysis_id")
+  key              String
+  title            String
+  rationale        String
+  evidenceKeys     Json                 @map("evidence_keys")
+  impact           RecommendationImpact
+  effort           RecommendationEffort
+  confidence       Int
+  priority         Int
+  steps            Json
+  generatorVersion String               @map("generator_version")
+  createdAt        DateTime             @default(now()) @map("created_at")
+  analysis         Analysis             @relation(fields: [analysisId], references: [id], onDelete: Cascade)
+  actions          RecommendationAction[]
+
+  @@unique([analysisId, key])
+  @@unique([analysisId, priority])
+  @@index([analysisId, priority])
+  @@map("recommendations")
+}
+
+model RecommendationAction {
+  id               String       @id @default(cuid())
+  recommendationId String       @map("recommendation_id")
+  businessId       String       @map("business_id")
+  userId           String       @map("user_id")
+  status           ActionStatus @default(NOT_STARTED)
+  note             String?
+  startedAt        DateTime?    @map("started_at")
+  completedAt      DateTime?    @map("completed_at")
+  createdAt        DateTime     @default(now()) @map("created_at")
+  updatedAt        DateTime     @updatedAt @map("updated_at")
+  recommendation   Recommendation @relation(fields: [recommendationId], references: [id], onDelete: Cascade)
+  business         Business       @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  user             User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([recommendationId, businessId])
+  @@index([businessId, status])
+  @@index([userId])
+  @@map("recommendation_actions")
+}
