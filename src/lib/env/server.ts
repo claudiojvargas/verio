@@ -7,7 +7,7 @@ const serverEnvironmentSchema = z.object({
   INTERNAL_JOB_SECRET: z.string().min(32),
   CLERK_SECRET_KEY: z.string().min(1),
   GOOGLE_AI_API_KEY: z.string().min(1).optional(),
-  GOOGLE_AI_MODEL: z.string().min(1).default("gemini-2.5-flash"),
+  GOOGLE_AI_MODEL: z.string().min(1).default("gemini-3.6-flash"),
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
 });
 
