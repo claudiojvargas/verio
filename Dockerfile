@@ -34,7 +34,7 @@ ENV NEXT_PUBLIC_APP_URL=$NEXT_PUBLIC_APP_URL \
     DATABASE_URL=postgresql://build:build@localhost:5432/build \
     CLERK_SECRET_KEY=sk_test_build_placeholder \
     INTERNAL_JOB_SECRET=build-placeholder-must-not-be-used \
-    GOOGLE_AI_MODEL=gemini-2.5-flash
+    GOOGLE_AI_MODEL=gemini-3.6-flash
 
 RUN npx prisma generate && npm run build
 
