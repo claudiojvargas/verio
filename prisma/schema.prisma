@@ -259,17 +259,23 @@ model AnalysisResult {
 /// Snapshot of competitors used by one analysis. It remains stable even if the
 /// user's current competitor set changes later.
 model AnalysisCompetitor {
-  analysisId          String   @map("analysis_id")
-  primaryBusinessId   String   @map("primary_business_id")
-  competitorBusinessId String  @map("competitor_business_id")
-  position            Int
-  totalScore          Int?     @map("total_score")
-  coveragePercentage  Int?     @map("coverage_percentage")
-  dimensions          Json?
-  createdAt           DateTime @default(now()) @map("created_at")
-  analysis            Analysis @relation(fields: [analysisId], references: [id], onDelete: Cascade)
-  primaryBusiness     Business @relation("PrimaryAnalysisBusiness", fields: [primaryBusinessId], references: [id], onDelete: Restrict)
-  competitorBusiness  Business @relation("ComparedAnalysisBusiness", fields: [competitorBusinessId], references: [id], onDelete: Restrict)
+  analysisId           String                @map("analysis_id")
+  primaryBusinessId    String                @map("primary_business_id")
+  competitorBusinessId String                @map("competitor_business_id")
+  position             Int
+  nameSnapshot         String                @map("name_snapshot")
+  citySnapshot         String                @map("city_snapshot")
+  stateSnapshot        String?               @map("state_snapshot")
+  channelsSnapshot     Json                  @map("channels_snapshot")
+  resultStatus         AnalysisResultStatus? @map("result_status")
+  totalScore           Int?                  @map("total_score")
+  coveragePercentage   Int?                  @map("coverage_percentage")
+  dimensions           Json?
+  evidence             Json?
+  createdAt            DateTime              @default(now()) @map("created_at")
+  analysis             Analysis              @relation(fields: [analysisId], references: [id], onDelete: Cascade)
+  primaryBusiness      Business              @relation("PrimaryAnalysisBusiness", fields: [primaryBusinessId], references: [id], onDelete: Restrict)
+  competitorBusiness   Business              @relation("ComparedAnalysisBusiness", fields: [competitorBusinessId], references: [id], onDelete: Restrict)
 
   @@id([analysisId, competitorBusinessId])
   @@unique([analysisId, position])

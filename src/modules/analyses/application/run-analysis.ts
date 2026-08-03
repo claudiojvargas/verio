@@ -7,7 +7,9 @@ import {
   safeFailureDetails,
   type AnalysisStage,
 } from "@/modules/analyses/application/analysis-events";
+import { parseCompetitorChannelsSnapshot } from "@/modules/analyses/application/competitor-snapshot";
 import { assessRegisteredChannels } from "@/modules/analyses/application/registration-assessment";
+import type { CredibilityAnalysisDraft } from "@/modules/analyses/ai/credibility-analysis";
 import { calculateVerioScore } from "@/modules/scoring";
 import { VERIO_SCORE_V1 } from "@/modules/scoring/policies/verio-score-v1";
 
@@ -16,9 +18,7 @@ export async function runAnalysis(analysisId: string) {
     where: { id: analysisId },
     include: {
       business: { include: { channels: true } },
-      competitors: {
-        include: { competitorBusiness: { include: { channels: true } } },
-      },
+      competitors: true,
     },
   });
   if (!analysis) throw new Error("ANALYSIS_NOT_FOUND");
@@ -76,6 +76,40 @@ export async function runAnalysis(analysisId: string) {
       durationMs: Date.now() - scoreStartedAt,
     });
 
+    currentStage = "COMPETITOR_SCORING";
+    const competitorStartedAt = Date.now();
+    await recordAnalysisEvent(db, {
+      analysisId: analysis.id,
+      stage: "COMPETITOR_SCORING",
+      status: "RUNNING",
+      publicMessage: "Calculando a comparação com concorrentes.",
+    });
+    const competitorResults = analysis.competitors.map((competitor) => {
+      const assessment = assessRegisteredChannels(
+        parseCompetitorChannelsSnapshot(competitor.channelsSnapshot),
+      );
+      return {
+        competitorBusinessId: competitor.competitorBusinessId,
+        assessment,
+        score: calculateVerioScore(assessment.observations, VERIO_SCORE_V1),
+      };
+    });
+    await recordAnalysisEvent(db, {
+      analysisId: analysis.id,
+      stage: "COMPETITOR_SCORING",
+      status: "COMPLETED",
+      publicMessage: "Comparação determinística concluída.",
+      technicalMessage:
+        "Competitor snapshots scored with the primary methodology",
+      metadata: {
+        competitorCount: competitorResults.length,
+        scoredCount: competitorResults.filter(
+          ({ score: competitorScore }) => competitorScore.status === "SCORED",
+        ).length,
+      },
+      durationMs: Date.now() - competitorStartedAt,
+    });
+
     currentStage = "AI_SYNTHESIS";
     const model = process.env.GOOGLE_AI_MODEL ?? "not-configured";
     const aiStartedAt = Date.now();
@@ -87,54 +121,69 @@ export async function runAnalysis(analysisId: string) {
       technicalMessage: "Calling provider-neutral AI analyzer",
       metadata: { provider: "google-ai", model },
     });
-    const ai = await createGoogleCredibilityAnalyzer().analyze(
-      {
-        business: {
-          name: analysis.business.name,
-          city: analysis.business.city,
+    let aiFailureCode: string | null = null;
+    let recommendations: CredibilityAnalysisDraft["recommendationDrafts"] = [];
+    let generatorVersion = "deterministic-fallback-v1";
+    let summary = createDeterministicSummary(
+      primaryAssessment.evidence.length,
+      score.coverage,
+    );
+    try {
+      const ai = await createGoogleCredibilityAnalyzer().analyze(
+        {
+          business: {
+            name: analysis.business.name,
+            city: analysis.business.city,
+          },
+          evidence: primaryAssessment.evidence,
         },
-        evidence: primaryAssessment.evidence,
-      },
-      AbortSignal.timeout(45_000),
-    );
-    await recordAnalysisEvent(db, {
-      analysisId: analysis.id,
-      stage: "AI_SYNTHESIS",
-      status: "COMPLETED",
-      publicMessage: "Resumo e recomendações validados.",
-      technicalMessage:
-        "Provider output passed schema and evidence-reference validation",
-      metadata: {
-        provider: ai.metadata.provider,
-        model: ai.metadata.model,
-        promptVersion: ai.metadata.promptVersion,
-        recommendationCount: ai.data.recommendationDrafts.length,
-      },
-      durationMs: Date.now() - aiStartedAt,
-    });
-    const positive = ai.data.observations.find(
-      ({ outcome }) => outcome === "POSITIVE",
-    );
-    const attention = ai.data.observations.find(
-      ({ outcome }) => outcome === "ATTENTION",
-    );
-    const summary = {
-      strength: positive?.explanation ?? ai.data.summary,
-      priority:
-        attention?.explanation ??
-        ai.data.recommendationDrafts[0]?.rationale ??
-        ai.data.summary,
-    };
-
-    const competitorResults = analysis.competitors.map((competitor) => {
-      const assessment = assessRegisteredChannels(
-        competitor.competitorBusiness.channels,
+        AbortSignal.timeout(45_000),
       );
-      return {
-        competitorBusinessId: competitor.competitorBusinessId,
-        score: calculateVerioScore(assessment.observations, VERIO_SCORE_V1),
+      const positive = ai.data.observations.find(
+        ({ outcome }) => outcome === "POSITIVE",
+      );
+      const attention = ai.data.observations.find(
+        ({ outcome }) => outcome === "ATTENTION",
+      );
+      summary = {
+        strength: positive?.explanation ?? ai.data.summary,
+        priority:
+          attention?.explanation ??
+          ai.data.recommendationDrafts[0]?.rationale ??
+          ai.data.summary,
       };
-    });
+      recommendations = ai.data.recommendationDrafts;
+      generatorVersion = `${ai.metadata.provider}:${ai.metadata.model}:${ai.metadata.promptVersion}`;
+      await recordAnalysisEvent(db, {
+        analysisId: analysis.id,
+        stage: "AI_SYNTHESIS",
+        status: "COMPLETED",
+        publicMessage: "Resumo e recomendações validados.",
+        technicalMessage:
+          "Provider output passed schema and evidence-reference validation",
+        metadata: {
+          provider: ai.metadata.provider,
+          model: ai.metadata.model,
+          promptVersion: ai.metadata.promptVersion,
+          recommendationCount: recommendations.length,
+        },
+        durationMs: Date.now() - aiStartedAt,
+      });
+    } catch (error) {
+      const failure = safeFailureDetails(error, model, "AI_SYNTHESIS");
+      aiFailureCode = failure.code;
+      await recordAnalysisEvent(db, {
+        analysisId: analysis.id,
+        stage: "AI_SYNTHESIS",
+        status: "FAILED",
+        code: failure.code,
+        publicMessage:
+          "A síntese por IA não ficou disponível; o resultado determinístico será preservado.",
+        technicalMessage: failure.technicalMessage,
+        metadata: failure.metadata,
+        durationMs: Date.now() - aiStartedAt,
+      });
+    }
 
     currentStage = "RESULT_PERSISTENCE";
     const persistenceStartedAt = Date.now();
@@ -171,6 +220,7 @@ export async function runAnalysis(analysisId: string) {
             },
           },
           data: {
+            resultStatus: competitor.score.status,
             totalScore: competitor.score.totalScore,
             coveragePercentage: Math.round(competitor.score.coverage),
             dimensions: competitor.score.categories.map(
@@ -179,13 +229,12 @@ export async function runAnalysis(analysisId: string) {
                 score: categoryScore,
               }),
             ) as Prisma.InputJsonValue,
+            evidence: competitor.assessment
+              .evidence as unknown as Prisma.InputJsonValue,
           },
         });
       }
-      for (const [
-        index,
-        recommendation,
-      ] of ai.data.recommendationDrafts.entries()) {
+      for (const [index, recommendation] of recommendations.entries()) {
         await transaction.recommendation.create({
           data: {
             analysisId: analysis.id,
@@ -198,13 +247,17 @@ export async function runAnalysis(analysisId: string) {
             confidence: 70,
             priority: index + 1,
             steps: recommendation.steps,
-            generatorVersion: `${ai.metadata.provider}:${ai.metadata.model}:${ai.metadata.promptVersion}`,
+            generatorVersion,
           },
         });
       }
       await transaction.analysis.update({
         where: { id: analysis.id },
-        data: { status: "COMPLETED", completedAt: new Date() },
+        data: {
+          status: aiFailureCode ? "PARTIAL" : "COMPLETED",
+          completedAt: new Date(),
+          failureCode: aiFailureCode,
+        },
       });
       await transaction.analysisJob.update({
         where: { analysisId: analysis.id },
@@ -223,7 +276,10 @@ export async function runAnalysis(analysisId: string) {
         analysisId: analysis.id,
         stage: "ANALYSIS_COMPLETED",
         status: "COMPLETED",
-        publicMessage: "Análise concluída.",
+        publicMessage: aiFailureCode
+          ? "Score e comparação concluídos; síntese de IA indisponível."
+          : "Análise concluída.",
+        metadata: { aiEnriched: !aiFailureCode },
       });
     });
   } catch (error) {
@@ -269,6 +325,19 @@ export async function runAnalysis(analysisId: string) {
     });
     throw error;
   }
+}
+
+function createDeterministicSummary(evidenceCount: number, coverage: number) {
+  return {
+    strength:
+      evidenceCount === 1
+        ? "A empresa possui um canal digital confirmado."
+        : `A empresa possui ${evidenceCount} canais digitais confirmados.`,
+    priority:
+      coverage < 70
+        ? "Amplie e mantenha atualizados os canais verificáveis para aumentar a cobertura do diagnóstico."
+        : "Mantenha os canais confirmados consistentes e atualizados.",
+  };
 }
 
 export async function processNextAnalysisJob(workerId: string) {

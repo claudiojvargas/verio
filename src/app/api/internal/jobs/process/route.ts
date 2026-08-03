@@ -23,10 +23,7 @@ export async function POST(request: Request) {
         : error instanceof Error && error.message === "NO_CONFIRMED_CHANNELS"
           ? error.message
           : "ANALYSIS_EXECUTION_FAILED";
-    console.error("Analysis job processing failed", { code, 
-      message: error instanceof Error ? error.message : String(error),
-      cause: error instanceof Error ? error.cause : undefined,
-      stack: error instanceof Error ? error.stack : undefined, });
+    console.error("Analysis job processing failed", { code });
     return NextResponse.json(
       { error: "processing_failed", code },
       { status: 500 },

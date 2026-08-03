@@ -10,7 +10,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "test": "node --import tsx --test src/modules/ai-analyzer/application/*.test.ts src/modules/analyses/ai/*.test.ts src/modules/analyses/application/*.test.ts src/modules/scoring/domain/*.test.ts src/modules/reports/application/*.test.ts",
+    "test": "node --import tsx --test src/modules/ai-analyzer/application/*.test.ts src/modules/analyses/ai/*.test.ts src/modules/analyses/application/*.test.ts src/modules/businesses/schemas/*.test.ts src/modules/scoring/domain/*.test.ts src/modules/reports/application/*.test.ts",
     "lint": "eslint . --max-warnings=0",
     "format": "prettier --write .",
     "format:check": "prettier --check .",

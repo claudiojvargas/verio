@@ -11,8 +11,13 @@ function safeWebUrl(message: string) {
     .trim()
     .url(message)
     .refine((value) => {
-      const url = new URL(value);
-      return ["http:", "https:"].includes(url.protocol) && !url.username && !url.password;
+      const url = parseUrl(value);
+      return (
+        url !== null &&
+        ["http:", "https:"].includes(url.protocol) &&
+        !url.username &&
+        !url.password
+      );
     }, "Utilize uma URL http ou https sem credenciais.");
 }
 
@@ -21,7 +26,8 @@ const googleMapsUrl = z
   .trim()
   .pipe(safeWebUrl("Informe o link completo do Google Maps."))
   .refine((value) => {
-    const hostname = new URL(value).hostname.toLowerCase();
+    const hostname = parseUrl(value)?.hostname.toLowerCase();
+    if (!hostname) return false;
     return (
       hostname === "maps.app.goo.gl" ||
       hostname === "goo.gl" ||
@@ -35,9 +41,18 @@ const whatsappUrl = z
   .trim()
   .pipe(safeWebUrl("Informe o link completo do WhatsApp."))
   .refine((value) => {
-    const hostname = new URL(value).hostname.toLowerCase();
+    const hostname = parseUrl(value)?.hostname.toLowerCase();
+    if (!hostname) return false;
     return hostname === "wa.me" || hostname.endsWith("whatsapp.com");
   }, "Utilize um link wa.me ou whatsapp.com.");
+
+function parseUrl(value: string) {
+  try {
+    return new URL(value);
+  } catch {
+    return null;
+  }
+}
 
 const locationFields = {
   name: z.string().trim().min(2, "Informe ao menos 2 caracteres.").max(160),
@@ -56,12 +71,21 @@ export const businessFormSchema = z.object({
   whatsapp: whatsappUrl,
 });
 
-export const competitorFormSchema = z.object({
-  ...locationFields,
-  googleMaps: z.union([z.literal(""), googleMapsUrl]),
-  website: optionalWebUrl,
-  whatsapp: z.union([z.literal(""), whatsappUrl]),
-});
+export const competitorFormSchema = z
+  .object({
+    ...locationFields,
+    googleMaps: z.union([z.literal(""), googleMapsUrl]),
+    website: optionalWebUrl,
+    whatsapp: z.union([z.literal(""), whatsappUrl]),
+  })
+  .refine(
+    ({ googleMaps, website, whatsapp }) =>
+      Boolean(googleMaps || website || whatsapp),
+    {
+      path: ["googleMaps"],
+      message: "Informe ao menos um canal do concorrente.",
+    },
+  );
 
 export type BusinessFormValues = z.infer<typeof businessFormSchema>;
 export type CompetitorFormValues = z.infer<typeof competitorFormSchema>;

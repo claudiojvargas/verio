@@ -1,4 +1,4 @@
-import { ArrowLeft } from "lucide-react";
+import { AlertTriangle, ArrowLeft } from "lucide-react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 
@@ -40,7 +40,6 @@ export default async function AnalysisResultPage({
       recommendations: { orderBy: { priority: "asc" } },
       competitors: {
         orderBy: { position: "asc" },
-        include: { competitorBusiness: true },
       },
     },
   });
@@ -79,8 +78,8 @@ export default async function AnalysisResultPage({
     }),
     ...analysis.competitors.map((competitor) =>
       toRankedBusiness({
-        id: competitor.competitorBusiness.id,
-        name: competitor.competitorBusiness.name,
+        id: competitor.competitorBusinessId,
+        name: competitor.nameSnapshot,
         score: competitor.totalScore,
         coverage: competitor.coveragePercentage,
         primary: false,
@@ -120,6 +119,20 @@ export default async function AnalysisResultPage({
           </p>
         </div>
       </header>
+
+      {analysis.status === "PARTIAL" ? (
+        <div className="flex gap-3 rounded-xl border border-amber-500/30 bg-amber-500/5 p-4 text-sm">
+          <AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-600" />
+          <div>
+            <p className="font-medium">Resultado determinístico disponível</p>
+            <p className="mt-1 text-muted-foreground">
+              O score e a comparação com concorrentes foram concluídos, mas a
+              síntese e as recomendações por IA não ficaram disponíveis nesta
+              execução.
+            </p>
+          </div>
+        </div>
+      ) : null}
 
       <ResultsDashboard
         businessName={analysis.business.name}

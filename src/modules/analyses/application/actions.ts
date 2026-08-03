@@ -13,6 +13,8 @@ export async function startAnalysis(
   _previousState: StartAnalysisState,
   _formData: FormData,
 ): Promise<StartAnalysisState> {
+  void _previousState;
+  void _formData;
   const user = await getOrCreateCurrentUser();
   if (!user) return { error: "Sua sessão expirou. Entre novamente." };
 
@@ -22,7 +24,12 @@ export async function startAnalysis(
       business: {
         include: {
           channels: true,
-          competitors: { orderBy: { position: "asc" } },
+          competitors: {
+            orderBy: { position: "asc" },
+            include: {
+              competitorBusiness: { include: { channels: true } },
+            },
+          },
         },
       },
     },
@@ -50,7 +57,11 @@ export async function startAnalysis(
         });
         if (running) throw new Error("ANALYSIS_IN_PROGRESS");
         const baseline = await transaction.analysis.findFirst({
-          where: { businessId: membership.businessId, status: "COMPLETED" },
+          where: {
+            businessId: membership.businessId,
+            status: { in: ["COMPLETED", "PARTIAL"] },
+            result: { isNot: null },
+          },
           orderBy: { completedAt: "desc" },
         });
         const analysis = await transaction.analysis.create({
@@ -79,6 +90,12 @@ export async function startAnalysis(
                 primaryBusinessId: membership.businessId,
                 competitorBusinessId: competitor.competitorBusinessId,
                 position: competitor.position,
+                nameSnapshot: competitor.competitorBusiness.name,
+                citySnapshot: competitor.competitorBusiness.city,
+                stateSnapshot: competitor.competitorBusiness.state,
+                channelsSnapshot: competitor.competitorBusiness.channels.map(
+                  ({ type, value, status }) => ({ type, value, status }),
+                ),
               })),
             },
           },
